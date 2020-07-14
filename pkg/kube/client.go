@@ -68,6 +68,8 @@ import (
 // MissingGetHeader is added to Get's output when a resource is not found.
 const MissingGetHeader = "==> MISSING\nKIND\t\tNAME\n"
 
+const KubsAPIErrorMsg = "unable to recognize \"\": no matches for kind"
+
 // ErrNoObjectsVisited indicates that during a visit operation, no matching objects were found.
 var ErrNoObjectsVisited = goerrors.New("no objects visited")
 
@@ -345,7 +347,7 @@ func (c *Client) Get(namespace string, reader io.Reader) (string, error) {
 	err = perform(tinfos, func(info *resource.Info) error {
 		mux.Lock()
 		defer mux.Unlock()
-		c.Log("Doing get for %s: %q", info.Mapping.GroupVersionKind.Kind, info.Name)
+		c.Log("Doing get for %s: %q in %q", info.Mapping.GroupVersionKind.Kind, info.Name, info.Namespace)
 		if err := info.Get(); err != nil {
 			c.Log("WARNING: Failed Get for resource %q: %s", info.Name, err)
 			missing = append(missing, fmt.Sprintf("%v\t\t%s", info.Mapping.Resource, info.Name))
@@ -490,13 +492,30 @@ type UpdateOptions struct {
 func (c *Client) UpdateWithOptions(namespace string, originalReader, targetReader io.Reader, opts UpdateOptions) error {
 	original, err := c.BuildUnstructured(namespace, originalReader)
 	if err != nil {
-		return fmt.Errorf("failed decoding reader into objects: %s", err)
+		// Checking for removed Kubernetes API error so can provide a more informative error message to the user
+		// Ref: https://github.com/helm/helm/issues/7219
+		if strings.Contains(err.Error(), KubsAPIErrorMsg) {
+			return fmt.Errorf("current release manifest contains removed kubernetes api(s) for this "+
+				"kubernetes version and it is therefore unable to build the kubernetes "+
+				"objects for performing the diff. error from kubernetes: %s", err)
+		} else {
+			return fmt.Errorf("failed decoding reader into objects: %s", err)
+		}
 	}
 
 	c.Log("building resources from updated manifest")
 	target, err := c.BuildUnstructured(namespace, targetReader)
 	if err != nil {
-		return fmt.Errorf("failed decoding reader into objects: %s", err)
+		// Checking for removed Kubernetes API error so can provide a more informative error message to the user
+		// Ref: https://github.com/helm/helm/issues/7219
+		if strings.Contains(err.Error(), KubsAPIErrorMsg) {
+			return fmt.Errorf("new release manifest contains removed kubernetes api(s) for this "+
+				"kubernetes version and it is therefore unable to build the kubernetes "+
+				"objects for deployment. error from kubernetes: %s", err)
+
+		} else {
+			return fmt.Errorf("failed decoding reader into objects: %s", err)
+		}
 	}
 
 	newlyCreatedResources := []*resource.Info{}
@@ -521,7 +540,7 @@ func (c *Client) UpdateWithOptions(namespace string, originalReader, targetReade
 			newlyCreatedResources = append(newlyCreatedResources, info)
 
 			kind := info.Mapping.GroupVersionKind.Kind
-			c.Log("Created a new %s called %q\n", kind, info.Name)
+			c.Log("Created a new %s called %q in %s\n", kind, info.Name, info.Namespace)
 			return nil
 		}
 
@@ -534,9 +553,10 @@ func (c *Client) UpdateWithOptions(namespace string, originalReader, targetReade
 		// See https://github.com/helm/helm/issues/1193 for more info.
 		if originalInfo == nil {
 			return fmt.Errorf(
-				"kind %s with the name %q already exists in the cluster and wasn't defined in the previous release. Before upgrading, please either delete the resource from the cluster or remove it from the chart",
+				"kind %s with the name %q in %q already exists in the cluster and wasn't defined in the previous release. Before upgrading, please either delete the resource from the cluster or remove it from the chart",
 				info.Mapping.GroupVersionKind.Kind,
 				info.Name,
+				info.Namespace,
 			)
 		}
 
@@ -852,7 +872,7 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 		return fmt.Errorf("failed to create patch: %s", err)
 	}
 	if patch == nil {
-		c.Log("Looks like there are no changes for %s %q", target.Mapping.GroupVersionKind.Kind, target.Name)
+		c.Log("Looks like there are no changes for %s %q in %q", target.Mapping.GroupVersionKind.Kind, target.Name, target.Namespace)
 		// This needs to happen to make sure that tiller has the latest info from the API
 		// Otherwise there will be no labels and other functions that use labels will panic
 		if err := target.Get(); err != nil {
@@ -865,20 +885,20 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 		obj, err := helper.Patch(target.Namespace, target.Name, patchType, patch, nil)
 		if err != nil {
 			kind := target.Mapping.GroupVersionKind.Kind
-			log.Printf("Cannot patch %s: %q (%v)", kind, target.Name, err)
+			log.Printf("Cannot patch %s: %q in %q (%v)", kind, target.Name, target.Namespace, err)
 
 			if force {
 				// Attempt to delete...
 				if err := deleteResource(target); err != nil {
 					return err
 				}
-				log.Printf("Deleted %s: %q", kind, target.Name)
+				log.Printf("Deleted %s: %q in %q", kind, target.Name, target.Namespace)
 
 				// ... and recreate
 				if err := createResource(target); err != nil {
 					return fmt.Errorf("Failed to recreate resource: %s", err)
 				}
-				log.Printf("Created a new %s called %q\n", kind, target.Name)
+				log.Printf("Created a new %s called %q in %s\n", kind, target.Name, target.Namespace)
 
 				// No need to refresh the target, as we recreated the resource based
 				// on it. In addition, it might not exist yet and a call to `Refresh`
@@ -979,7 +999,7 @@ func (c *Client) watchUntilReady(timeout time.Duration, info *resource.Info) err
 	lw := cachetools.NewListWatchFromClient(info.Client, info.Mapping.Resource.Resource, info.Namespace, selector)
 
 	kind := info.Mapping.GroupVersionKind.Kind
-	c.Log("Watching for changes to %s %s with timeout of %v", kind, info.Name, timeout)
+	c.Log("Watching for changes to %s %s in %s with timeout of %v", kind, info.Name, info.Namespace, timeout)
 
 	// What we watch for depends on the Kind.
 	// - For a Job, we watch for completion.
