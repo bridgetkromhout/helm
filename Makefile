@@ -1,5 +1,5 @@
-DOCKER_REGISTRY   ?= gcr.io
-IMAGE_PREFIX      ?= kubernetes-helm
+DOCKER_REGISTRY   ?= ghcr.io
+IMAGE_PREFIX      ?= helm
 DEV_IMAGE         ?= golang:1.14
 SHORT_NAME        ?= tiller
 SHORT_NAME_RUDDER ?= rudder
@@ -100,7 +100,7 @@ docker-build-experimental: check-docker docker-binary docker-binary-rudder
 
 .PHONY: test
 test: build
-test: TESTFLAGS += -race -v
+test: TESTFLAGS += -v
 test: test-style
 test: test-unit
 
